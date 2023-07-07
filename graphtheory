@@ -1,0 +1,124 @@
+setwd("C:/Connectivity/")
+
+install.packages(c("raster","rgdal","rgeos","gdistance","igraph","fitdistrplus", "terra"))
+
+library(raster)           #for raster covariate data
+library(rgdal)            #for reading different types of GIS files .
+library(rgeos)            #for centroids of polygons
+library(gdistance)        #for least-cost paths/circuit theory 
+library(igraph)           #for patch-based graphs
+library(fitdistrplus)     #for fitting kernels
+library(terra)            #for binding the national park layers
+library(RColorBrewer)     #for legend
+
+#read in land cover classification and Switzerland shapefiles
+CLC<-raster("CLC_2018.tif")
+Switzerland<-readOGR("basis98small.shp")
+nodes<-vect("wetlandSwiss.shp")
+
+View(nodes)
+plot(nodes)
+
+# Patch data
+node_centroids <- centroids(nodes)
+print(node_centroids)
+
+#make distance matrix
+coords <- crds(node_centroids)
+print(coords)
+
+distmat <- pointDistance(coords, lonlat=F) #set lonlat to FALSE because our data is projected (i.e in metres)
+
+distmat <- distmat/1000 #in km
+
+##############################
+# Creating a patch-based graph
+###############################
+
+mean.dist <-30.4 #For female pine martens from Stringer et al. 2015
+
+#Create a binary adjacency matrix with mean distance
+A.mean <- matrix(0, nrow=nrow(distmat), ncol=ncol(distmat))
+A.mean[distmat < mean.dist] <- 1
+diag(A.mean) <- 0
+
+#Create adjacency matrix with negative exponential function (probability)
+A.prob <- matrix(0, nrow=nrow(distmat), ncol=ncol(distmat))
+alpha <- 1/mean.dist
+A.prob <- exp(-alpha*distmat) #negative exponential
+diag(A.prob) <- 0
+
+#create igraph objects
+
+graph.Amean <- graph.adjacency(A.mean, mode="undirected", weighted=NULL)
+graph.Aprob <- graph.adjacency(A.prob, mode="undirected", weighted=T)
+
+#plot mean distance nodes
+plot(nodes)
+plot(graph.Amean, vertex.label=NA, edge.color="transparent", vertex.size=55^3, layout=coords, add=TRUE,rescale=FALSE)
+
+#plot probability of movement between nodes 
+plot(nodes)
+plot(graph.Aprob, vertex.label=NA, edge.color="grey", vertex.size=55^3, layout=coords, add=TRUE,rescale=FALSE)
+
+###############################################
+#Patch connectivity
+###############################################
+
+Amean.degree <- degree(graph.Amean)
+
+Amean.between <- betweenness(graph.Amean)
+
+#betweenness centrality for weighted graph
+Aprob.between <- betweenness(graph.Aprob, weights=1/E(graph.Aprob)$weight) #betweenness is calculated based on shortest paths (i.e. lower values are better) so we take the inverse of the weights from our graph.Aprob object.
+
+#plot degree
+plot(nodes)
+plot(graph.Amean, layout=coords,vertex.size=Amean.degree^2.5, main= "Degree",
+     vertex.label=NA, edge.color="transparent", add=TRUE,rescale=FALSE)
+
+#plot betweenness
+plot(nodes)
+plot(graph.Amean, layout=coords,vertex.size=Amean.between^1.9, main= "Betweenness",
+     vertex.label=NA, edge.color="transparent", add=TRUE,rescale=FALSE)
+
+###Probability of Connectivity, PC###
+#total area of study in km^2
+area<-nodes$Shape_Area
+head(nodes)
+
+#calculate landscape-scale connectivity
+pstar.mat <- shortest.paths(graph.Aprob, weights= -log(E(graph.Aprob)$weight)) #calculate all shortest paths between nodes
+pstar.mat <- exp(-pstar.mat)                                                   #back-transform to probabilities of connectedness
+PCnum <- outer(area, area)*pstar.mat                                           #get product of all patch areas ij and multiply by probabilities above
+PC <- sum(PCnum)/AL^2 #divide by total area of the study squared to get the PC metric
+
+#function for calculating dPC - contribution of each patch to PC. Here we simply remove each patch using a for loop and repeat the above function, adding the difference between PC above and each new calculation (minus patch "i") to am empty vector "dPC 
+
+prob.connectivity <- function(prob.matrix, area,landarea){
+  
+  #dPC
+  N <- nrow(prob.matrix) #each row is a patch
+  dPC <- rep(NA, N) #empty vector to store results for each patch
+  
+  
+  
+  for (i in 1:N) {
+    prob.matrix.i <- prob.matrix[-i,-i]
+    area.i <-area[-i]
+    pc.graph.i <- graph.adjacency(prob.matrix.i, mode="undirected", weighted=TRUE)
+    pstar.mat.i <- shortest.paths(pc.graph.i, weights= -log(E(pc.graph.i)$weight))
+    pstar.mat.i <- exp(-pstar.mat.i)
+    PCmat.i <- outer(area.i, area.i)*pstar.mat.i
+    PC.i <- sum(PCmat.i)/landarea^2
+    dPC[i] <- (PC-PC.i)/PC*100
+  }
+  
+  return(dPC)
+}
+
+Aprob.PC <- prob.connectivity(prob.matrix=A.prob, area=area, landarea=AL)
+
+plot(nodes)
+plot(graph.Aprob,layout=coords,vertex.size=Aprob.PC^4.8, main= "dPC",
+     vertex.label.color="transparent", edge.color="transparent", add=TRUE,rescale=FALSE)
